@@ -1,0 +1,525 @@
+% !TEX encoding = UTF-8 Unicode
+% !TEX TS-program = latex
+\documentclass[11pt]{article}
+\usepackage{geometry}                % See geometry.pdf to learn the layout options. There are lots.
+\geometry{a4paper}                   % ... or a4paper or a5paper or ... 
+%\geometry{landscape}                % Activate for for rotated page geometry
+\usepackage[parfill]{parskip}    % Activate to begin paragraphs with an empty line rather than an indent
+\usepackage{graphicx}
+\usepackage{amssymb}
+\usepackage{epstopdf}
+\usepackage{fullpage}
+\usepackage{listings}
+\usepackage{url}
+\DeclareGraphicsRule{.tif}{png}{.png}{`convert #1 `dirname #1`/`basename #1 .tif`.png}
+
+\title{GCC internal programming tips}
+\author{Wen ZHANG}
+%\date{}                                           % Activate to display a given date or no date
+
+\begin{document}
+
+%%%%%%%%%
+\lstset{
+    language=c,
+    breaklines=true,
+    frame=single,
+    tabsize=4,
+    basicstyle=\ttfamily\scriptsize
+}
+%%%%%%%%%
+
+\maketitle
+
+\tableofcontents
+\pagebreak
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%SEC: INTRODUCTION %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Licence}
+This work is licensed under the Creative Commons Attribution 3.0 Unported License. To view a copy of this license, visit http://creativecommons.org/licenses/by/3.0/ or send a letter to Creative Commons, 171 Second Street, Suite 300, San Francisco, California, 94105, USA.
+\pagebreak
+
+\section{Introduction}
+The information provided in the official GCC Internal manual is far from necessary for developers to add their own features to GCC, so I conclude all my experience in hacking gcc to this article. You can see this as a complementary part to the internal manual. Hope this article can provide some useful tips to you.
+
+By the way, if not write explicitly, the functions and methods are used in GIMPLE stage. 
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%SEC: DECLARE TYPES %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Declare types}
+In this section, I will show some tips about how to declare types manually by the developers in GCC.
+
+\subsection{Declare pointer types}
+\begin{lstlisting}[mathescape]
+build_pointer_type(tree type)
+\end{lstlisting}
+This is used to declare the pointer type of type \texttt{type} \\
+For example:
+
+\begin{lstlisting}[mathescape]
+ptr_integer_type_node = build_pointer_type(integer_type_node);
+\end{lstlisting}
+
+
+\subsection{Declare qualified types}
+\begin{lstlisting}[mathescape]
+build_qualified_type(tree type, int type_quals)
+\end{lstlisting}
+This is used to declare a qualified type of type \texttt{type}, the qualifiers are decided by type\_quals, which are 
+\begin{enumerate}
+	\item \texttt{TYPE\_UNQUALIFIED}
+	\item \texttt{TYPE\_QUAL\_CONST}
+	\item \texttt{TYPE\_QUAL\_VOLATILE}
+	\item \texttt{TYPE\_QUAL\_RESTRICT}
+\end{enumerate}
+
+We can use \texttt{|} to declare multiple qualifiers at the same time.\\
+
+For example:
+\begin{lstlisting}[mathescape]
+const_integer_type_node = build_qualified_type(integer_type_node, TYPE_QUAL_CONST)
+\end{lstlisting}
+
+
+\subsection{Declare mixed types}
+We can combine the above method to declare a mixed type. For example, to declare a \texttt{const int *} type, we need the following statement:
+\begin{lstlisting}[mathescape]
+const_ptr_pointer_type_node = build_qualified_type(build_pointer_type(integer_type_node), TYPE_QUAL_CONST);
+\end{lstlisting}
+
+
+\subsection{Declare structures}
+To declare a structure, we need to follow two steps:
+
+\begin{enumerate}
+	\item Use build\_decl() (see section \ref{sec:subsec:declareLocalVar} for details) to generate fields, and use \texttt{TREE\_CHAIN()} to chain all the fields together. For example, we need to declare a structure like figure \ref{fig:exampleStructure}, we need to use method in figure \ref{fig:buildExmpleStructFields} to generate all the fields.
+
+
+\begin{figure}[!htb]
+\begin{lstlisting}[mathescape]
+struct example_structure
+{
+	int field1;
+	char field2;
+};
+\end{lstlisting}
+\caption{example sturcture}
+\label{fig:exampleStructure}
+\end{figure}
+
+\begin{figure}[!htb]
+\begin{lstlisting}[mathescape]
+tree field, fields;
+
+fields = build_decl(BUILTINS_LOCATION, FIELD_DECL, get_identifier("field1"), integer_type_node);
+
+field = build_decl(BUILTINS_LOCATION, FIELD_DECL, get_identifier("field2"), char_type_node);
+TREE_CHAIN(field) = fields;
+fields = field;
+\end{lstlisting}
+\caption{Build example structure fields}
+\label{fig:buildExmpleStructFields}
+\end{figure}
+
+	\item Declare a record type, associate the fields with the type, and layout the new structure type. Luckily, the latter two steps are encapsulated in the function \texttt{finish\_builtin\_struct()}. To finish declaring the structure in figure \ref{fig:exampleStructure}, we need the codes in \ref{fig:finishDeclareStruct} to handle the left works.
+	
+\begin{figure}
+\begin{lstlisting}[mathescape]
+tree struct_type;
+
+struct_type = lang_hooks.types.make_type(RECORD_TYPE);
+finish_builtin_struct(struct_type, "example_structure", fields, NULL_TREE);
+\end{lstlisting}
+\caption{Finish declaring the structure}
+\label{fig:finishDeclareStruct}
+\end{figure}
+
+\end{enumerate}
+
+\pagebreak
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%SEC: DECLARE VARS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Declare variables}
+In this section, I will introduce some practical tips to declare local and global variables in GCC. 
+
+\subsection{Declare local variables}
+\label{sec:subsec:declareLocalVar}
+There are several ways to declare a variable, but at first I want to introduce a very low level method, and then to the high-level functions.
+
+\begin{enumerate}
+\item \texttt{tree build\_decl(location\_t loc, enum tree\_code code, tree name, tree type)}
+We can use this function to declare a variable in type \texttt{type} with name \texttt{name}, and with all its properties, such as initial value, whether static or not, whether external or not, in their defaults, maybe 0. These 0s of course have different meanings for different properties. You can check \texttt{tree.h} for detailed explanations. This function has four parameters, \texttt{loc} is the location information for debugging I guess. \texttt{code} refers to the kind of the node, and usually is \texttt{VAR\_DECL} if we want to declare a variable node. \texttt{name} is the name of the variable, this is not a string, and we'd better use \texttt{get\_identifier()} function to generate it. \texttt{type} for a variable declaration is the type of the variable, for example if we want to declare a integer, here can be \texttt{integer\_type\_node}. The return is the declared variable. The next step is modifying its properties following our purpose.\\
+
+\item \texttt{tree create\_tmp\_var\_raw(tree type, const char *prefix)}
+This function is a higher level wrapper of \texttt{build\_decl()}. It can be used to declare a local variable in a function by modifying the attributes of the node. \texttt{type} is the type of the variable. \texttt{prefix} is the prefix of the variable name which is in the form of \texttt{prefix} + \texttt{.} + \texttt{index no.}. The return is the declared variable.\\ 
+
+\item \texttt{tree make\_rename\_temp(tree type, const char *prefix)}
+This function is higher than and indirectly wraps \texttt{create\_tmp\_var\_raw()}. This function does more work to add the newly declared variable, and requires we are in GIMPLE stages I guess. So there's no need to use this function in earlier stages, or it may cause some problem. The parameters and the return are the same as that of the function \texttt{create\_tmp\_var\_raw()}.\\
+
+\end{enumerate}
+
+\subsection{Declare global variables}
+To declear a global variable, we should notice two points.
+\begin{enumerate}
+\item global variables should be defined in the file scope, and in order to add a variable to the file scope, a good place I know is around invoking \texttt{PLUGIN\_START\_UNIT} plugin callback; or add it in the function handling this plugin event if using the plugin. There may be some methods can achieve the same effect in the function level, but I am not sure.  
+\item we can use the \texttt{build\_decl()} function to declare the variable, and then set its properties. If the variable is a extern one, \texttt{TREE\_PUBLIC} and \texttt{DECL\_EXTERNAL} should be 1, and \texttt{TREE\_STATIC} should be 0; otherwise, \texttt{TREE\_PUBLIC} and \texttt{TREE\_STATIC} should be 1, and \texttt{DECL\_EXTERNAL} should be 0.
+\end{enumerate}
+
+\pagebreak
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%SEC: DECLARE FUNCS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Declare functions}
+In this section, I will elaborate the way to declare a function. Note that this method is used to declare a function only, but will not instrument function. We can use this method only when the function is existed in the program or can be called from an external library linked with the program.
+
+To declare a function, we have two steps:
+\begin{enumerate}
+	\item Declare the return variable type, and all parameter types. We can use \texttt{build\_function\_type\_list()} to achieve this purpose, the parameters are the first one is the return type of the function to declare, and the left are the parameters of the function to declare from left to right. The end of parameter list is indicated by a \texttt{NULL\_TREE}.  For example, we need to declare the function \texttt{int getrusage(int who, struct rusage *usage)}, suppose we have already declared the type \texttt{struct rusage *usage} as \texttt{struct\_rusage}, the code to declare the return and parameter list is as figure \ref{fig:Build-fn-list}. 
+	
+	\begin{figure}
+	\begin{lstlisting}[mathescape]
+	tree fn_type_list;
+
+	fn_type_list = build_function_type_list(integer_type_node, integer_type_node, build_pointer_type(struct_usage), NULL_TREE);
+	\end{lstlisting}
+	\caption{Build return and parameter type list for the function}
+	\label{fig:Build-fn-list}
+	\end{figure}
+	
+	\item Use \texttt{build\_fn\_decl()} function to declare the function. The first parameter is the function name; the second parameter is the return and parameter type we generated in the last step. See figure \ref{fig:Build-fn-decl}.
+	
+	\begin{figure}
+	\begin{lstlisting}
+	tree fn;
+	
+	fn = build_fn_decl("getrusage", fn_type_list);
+	\end{lstlisting}
+	\caption{Declare function}
+	\label{fig:Build-fn-decl}
+	\end{figure}
+\end{enumerate} 
+
+\pagebreak
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%SEC: CONTAINERS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Built-in data structures}
+GCC source code provides several implemented advanced data structures. I want to introduce two of
+them, hash table and splay tree. These two data structures are in libiberty.
+
+\subsection{Hash table}
+A brief introduction of hash table can be found in \url{http://en.wikipedia.org/wiki/Hash_table}. I will only discuss several hash table interfaces provided by the libiberty. The header file is at the ``include/hashtab.h''. The source file is at the ``libiberty/hashtab.c''. This hash table can store \texttt{<key, value>} pairs, and \texttt{key} is the hash value of something, for example the hash value of the \texttt{value}.
+
+\subsubsection{Create a hash table}
+We can use the function \texttt{htab\_t htab\_create\_alloc(size\_t, htab\_hash, htab\_eq, htab\_del, htab\_alloc, htab\_free)} to allocate a hash table.
+The first argument is the initial number of the slots in the hash table. But the total amount of the slots can vary dynamically while using the hash table.
+The second argument is a function hash table used to do the hashing and generate the key. This is a user defined function in the form of \texttt{hashval\_t functionName(const void *)}.
+The third argument is a function hash table used to do the comparison between keys. This is a user defined function in the form of \texttt{int functionName(const void *, const void *)}.
+The fourth argument is a function will be called when user requiring removing some entry from the hash table. This is a user defined function in the form of \texttt{void functionName(void *)}. This function is not necessarily needed, and can be set to \texttt{NULL} sometimes.
+The fifth and the sisth arguments are the user defined functions for allocation and free of the hash table. The fifth argument is similar to \texttt{calloc}, and in the form of \texttt{void *functionName(size\_t, size\_t)}. The sixth argument is in the form of \texttt{void functionName(void *)}.
+
+There is a simplified version of \texttt{htab\_create\_alloc()}, which is \texttt{htab\_t htab\_create(size\_t, htab\_hash, htab\_eq, htab\_del)}. The \texttt{htab\_alloc} and the \texttt{htab\_free} are using gcc internal allocation and free mechanism.
+
+This hash table structure has already implementeda simple \texttt{htab\_hash} function , and a \texttt{htab\_eq} function for pointers, which are \texttt{htab\_hash\_pointer} and \texttt{htab\_eq\_pointer}. So we can directly use them when we need to use hash table to handle pointers. Further more, there is a \texttt{htab\_hash\_string} function which can be used as \texttt{htab\_hash} for strings. Here is a very simple case for the user to create a hash table using pointers as keys, see figure \ref{fig:create-pointer-hash-table}.
+
+\begin{figure}
+\begin{lstlisting}
+#include "hashtab.h"
+
+htab_t pointer_htab;
+
+pointer_htab = htab_create(1024, htab_hash_pointer, htab_eq_pointer, NULL);
+\end{lstlisting}
+\caption{Create a simple pointer hash table}
+\label{fig:create-pointer-hash-table}
+\end{figure}
+
+\subsubsection{Find, Insert and Delete items from the hash table}
+Both Insert and Delete operations are all depending on the Find operation for the hash table. In this implementation, find function has two modes, one is find, the the other is find and insert. So if we want to find or want to delete some item, we need to use find mode, and if we want to do the insert operation, we need to use the find and insert mode.
+
+There are four functions for find.
+\begin{enumerate}
+\item \texttt{PTR htab\_find\_with\_hash(htab\_t htab, const PTR element, hashval\_t hash)}
+\item \texttt{PTR htab\_find(htab\_t htab, const PTR element)}
+\item \texttt{PTR * htab\_find\_slot\_with\_hash(htab\_t htab, const PTR element, hashval\_t hash, enum insert\_operation insert)}
+\item \texttt{PTR * htab\_find\_slot(htab\_t htab, const PTR element, enum insert\_operation insert)}
+\end{enumerate}
+
+Note that \texttt{PTR} is an alias of \texttt{void *} for ansi C definition and \texttt{char *} for traditional C definition. The definition for \texttt{enum insert\_operation} is \texttt{enum insert\_operation \{NO\_INSERT, INSERT\}}.
+
+
+The first two function is a group of function which only return the found item, however, the latter two return the address of the found item. So for insert and delete operations, we need to use the latter two to locate the slot. for the first and the third functions, the second argument is the \texttt{value} of the pair, and the third argument hash is the \texttt{key} of the pair. The second and the fourth functions are the simplified versions respectively. They use the hash value of the \texttt{value} from the pair as the \texttt{key}.
+
+
+In order to insert a pair into the hash table, we need to use either of the last two functions, and set the \texttt{insert} \texttt{INSERT}. The function will automatically insert the pair into the proper place in the hash table, or even expanded it if there is not enough places.
+
+To delete a pair, we need to use either of the last two functions, and set the \texttt{insert} \texttt{NO\_INSERT}, to locate the pair. Then we need to use \texttt{void htab\_clear\_slot(htab\_t htab, PTR *slot)} to clear the contents in the slot.
+For simplicity, here are two functions encapsulate the two steps of deleting a pair.
+\begin{enumerate}
+\item \texttt{void htab\_remove\_elt(htab\_t htab, PTR element)}
+\item \texttt{void htab\_remove\_elt\_with\_hash(htab\_t htab, PTR element, hashval\_t hash)}
+\end{enumerate}
+The difference of the two is the former one use the hash of the \texttt{element}(\texttt{value}) as the \texttt{hash}. The latter one requires user inputing a hash value(\texttt{key}) manualy.
+\subsubsection{Traverse a hash table}
+Sometimes we need to traverse the hash table and apply some actions to each pair. Libiberty's implementation provides this traverse function, we can directly use it. There are two functions for traversing.
+\begin{enumerate}
+\item \texttt{void htab\_traverse\_noresize(htab\_t htab, htab\_trav callback, PTR info)}
+\item \texttt{void htab\_traverse(htab\_t htab, htab\_trav callback, PTR info)}
+\end{enumerate}
+
+Both functions will traverse the hash table \texttt{htab}. For each found pair, it will apply the function \texttt{callback}, which is \texttt{int functionName(void **, void *)}, and it will pass \texttt{info} to the callback function as its second argument. This helps pass user-defined data into the callback function. If the callback function returns 0, then the traverse will be aborted, otherwise it continues traversing.
+
+\subsubsection{Dispose a hash table}
+We can call \texttt{void htab\_delete(htab\_t htab)} to dispose a hash table.
+
+\subsubsection{Miscellaneous}
+Here are parts of other functions.
+\begin{enumerate}
+\item \texttt{size\_t htab\_size(htab\_t htab)}. Return the current size of the hash table.
+\item \texttt{size\_t htab\_elements(htab\_t htab)}. Return current number of elements(pairs) in the hash table.
+\end{enumerate}
+
+\subsection{Splay tree}
+Splay tree is a balanced tree structure, and a brief introduction of it can be found in
+\url{http://en.wikipedia.org/wiki/Splay_tree}. I will introduce the splay tree interfaces provided by the libiberty.
+The header file is at ``include/splay-tree.h'' and the source file is at ``libiberty/splay-tree.c''.
+Note that each node of the tree is a \texttt{<key, value>} pair.
+
+\subsubsection{Create and delete a splay tree}
+There are two functions for creating a splay tree:
+\begin{enumerate}
+\item \texttt{splay\_tree splay\_tree\_new(splay\_tree\_compare\_fn, splay\_tree\_delete\_key\_fn, splay\_tree\_delete\_value\_fn)}
+\item \texttt{splay\_tree splay\_tree\_new\_with\_allocator(splay\_tree\_compare\_fn,
+        splay\_tree\_delete\_key\_fn, splay\_tree\_delete\_value\_fn,
+        splay\_tree\_allocate\_fn, splay\_tree\_deallocate\_fn, void *)}
+\end{enumerate}
+Both functions require user provide a compare function \texttt{splay\_tree\_compare\_fn} for comparing the keys. \texttt{splay\_tree\_delete\_key\_fn}
+and \texttt{splay\_tree\_delete\_value\_fn} are optional functions provided by the user. They will be called when removing a node from the tree. The second 
+function enable user to provide additional \texttt{splay\_tree\_allocate\_fn} and \texttt{splay\_tree\_deallocate\_fn} functions to override the default 
+allocation and deallocation scheme. The last parameter is for passing additional user data to the allocation and deallocation functions.
+
+The libiberty implementation has already provides two comparing functions for integers and pointers. They are \texttt{int splay\_tree\_compare\_ints(splay\_tree\_key, splay\_tree\_key)}
+and \texttt{int splay\_tree\_compare\_pointers(splay\_tree\_key, splay\_tree\_key)}. Either of them can serve as \texttt{splay\_tree\_compare\_fn}
+
+The function \texttt{void splay\_tree\_delete(splay\_tree)} is used for delete a splay tree.
+\subsubsection{Insert, remove and lookup elements in the splay tree}
+
+To insert a \texttt{<key, value>} pair into the splay tree, we can use the function \texttt{splay\_tree\_node splay\_tree\_insert(splay\_tree, splay\_tree\_key, splay\_tree\_value)}.
+
+We can use the function \texttt{void splay\_tree\_remove(splay\_tree, splay\_tree\_key)} to remove a pair of data from the splay tree.
+
+We can also use the function \texttt{splay\_tree\_node splay\_tree\_lookup(splay\_tree, splay\_tree\_key)} to find a pair in the splay tree.
+
+\subsubsection{Miscellaneous}
+Here are some other functions for the splay tree.
+\begin{enumerate}
+\item \texttt{splay\_tree\_node splay\_tree\_predecessor(splay\_tree, splay\_tree\_key)}
+\item \texttt{splay\_tree\_node splay\_tree\_successor(splay\_tree, splay\_tree\_key)}
+\item \texttt{splay\_tree\_node splay\_tree\_max(splay\_tree)}
+\item \texttt{splay\_tree\_node splay\_tree\_min(splay\_tree)}
+\item \texttt{int splay\_tree\_foreach(splay\_tree, splay\_tree\_foreach\_fn, void *)}
+\end{enumerate}
+
+I have not tried them yet, so you can try them as needed.
+\pagebreak
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%SEC: CONSTANTS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Constants}
+In this section, I will introduce some constants maybe used while programming. The constant nodes for types are in table \ref{tab:constant-type-nodes}, and for values are in table \ref{tab:constant-value-nodes}. These constant nodes can be found in ``gcc/tree.h''. There are also many builtin functions that can be directly used, such \texttt{printf()}. These function indices can be found in ``gcc/builtins.def''. To get the declaration of the functions, user need to use the \texttt{BUILT\_IN\_XXX} for each function as index, and locate them in the built\_in\_decls[\ ] array. For example, if we want to generate GIMPLE statment to use \texttt{printf()} to print out the ``Hello, world!'', we need to following the code in figure \ref{fig:print-hello-world}.  
+
+\begin{table}
+\begin{center}
+\begin{tabular}{|l|l|}
+\hline 
+Constant & Explanation \\ \hline
+char\_type\_node & char type \\
+signed\_char\_type\_node & signed char type \\
+unsigned\_char\_type\_node & unsigned char type \\
+short\_integer\_type\_node & short integer type \\
+short\_unsigned\_type\_node & short unsigned integer type \\
+integer\_type\_node & integer type \\
+unsigned\_type\_node & unsigned integer type \\
+long\_integer\_type\_node & long integer type \\
+long\_unsigned\_type\_node & long unsigned integer type\\
+long\_long\_integer\_type\_node & long long integer type \\
+long\_long\_unsigned\_type\_node & long long unsigned integer type\\
+uint32\_type\_node & uint32\_t type \\
+uint64\_type\_node & uint64\_t type \\
+float\_type\_node & float type \\
+double\_type\_node & double type\\
+long\_double\_type\_node & long double type\\
+float\_ptr\_type\_node & float * type \\
+double\_ptr\_type\_node & double * type\\
+long\_double\_ptr\_type\_node & long double * type\\
+integer\_ptr\_type\_node & int * type\\
+void\_type\_node & void type\\
+ptr\_type\_node & void * type \\
+const\_ptr\_type\_node & const void * type \\
+size\_type\_node & size\_t type \\
+pid\_type\_node & pid\_t type \\
+fileptr\_type\_node & FILE * type\\
+\hline
+\end{tabular}
+\end{center}
+\caption{Constant type nodes}
+\label{tab:constant-type-nodes}
+\end{table}
+
+
+\begin{table}
+\begin{center}
+\begin{tabular}{|l|l|}
+\hline
+Constant & Explanation \\ \hline
+integer\_zero\_node & (int)0 \\
+integer\_one\_node & (int)1 \\
+integer\_minus\_one\_node & (int)-1 \\
+size\_zero\_node & (size\_t)0 \\
+size\_one\_node & (size\_t)1 \\
+null\_pointer\_node & NULL \\
+\hline
+\end{tabular}
+\end{center}
+\caption{Constant value nodes}
+\label{tab:constant-value-nodes}
+\end{table}
+
+\begin{figure}
+\begin{lstlisting}
+tree hello_world_str;
+/* suppose "Hello, world!" string has already stored in the hello_world_str */
+tree fn_printf;
+gimple stmt;
+
+fn_printf = built_in_decls[BUILT_IN_PRINTF];
+stmt = gimple_build_call(fn_printf, 1, hello_world_str);
+\end{lstlisting}
+\caption{Use builtin \texttt{printf()} to generate a GIMPLE statement which can print out "Hello, world!"}
+\label{fig:print-hello-world}
+\end{figure}
+
+\pagebreak
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%SEC: Maintain CFG %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Maintain CFG}
+This section will introduce the steps of maintaining the CFG. 
+\subsection{Create basic blocks}
+In order to modify the control flow graph, we need to create basic blocks sometimes. There are at least two kinds of ``creating'', one is spliting the existing basic block, and the other is creating a basic block from zero. Spliting a basic block is easy, we can simply use the function \texttt{edge split\_block(basic\_block bb, void *i)}. The explanation for the function is ``Splits basic block BB after the specified instruction I (but at least after the labels).  If I is NULL, splits just after labels.  The newly created edge is returned.  The new basic block is created just after the old one.'', from ``gcc/cfghooks.c''. This function will take care maintaining the CFG, so just feel ease to use it. Creating a basic block from zero is also easy, but we need to maintain the CFG manually. Normally, we can use the function \texttt{basic\_block create\_basic\_block(void *head, void *end, basic\_block after)} to create a basic block. Usually the first argument is the a gimple sequence(gimple\_seq) containing the statements for the block, the second argument is NULL, and the third is a basic block that the newly create basic block will be linked after(all basic blocks are stored in a link list, which is not necessarily having relationships with the CFG). There are some attributes of the basic block I'm not sure whether need to be set for the newly created ones. Here are they: 
+\begin{enumerate}
+\item \texttt{discriminator}. I usually set it one larger than the previous block.
+\end{enumerate}
+
+For each statement in the newly created block \texttt{A}, user need to use the function \texttt{void gimple\_set\_bb(gimple stmt, basic\_block bb)} to set it belonging to the \texttt{A}.
+
+\subsection{Maintain control flow graph}
+After creating a basic block, we need to insert it into the control flow graph. You can learn the detail from the ``cfg'' pass, which is from ``gcc/tree-cfg.c'', of cource. Here I will notice some important and useful tips. One of the key points of maintaining the control flow grpah is maintaining the edges between the basic blocks. Here are some functions for creating, removing, and redirecting edges.
+\begin{enumerate}
+\item \texttt{edge make\_edge(basic\_block src, basic\_block dest, int flags)}. Make a edge from \texttt{src} to \texttt{dest}. The edge type is notified by \texttt{flags}, which can be \texttt{EDGE\_FALLTHRU} if \texttt{dest} is the direct son of the \texttt{src} in CFG, \texttt{EDGE\_TURE\_VALUE} if \texttt{src} is end of a branch statement, for example \texttt{if...cond}, and \texttt{dest} is the block to execute when the branch condition is ture, \texttt{EDGE\_FALSE\_VALUE} is similar, and so on. The rest possible flag values can be found at the file ``gcc/basic-block.h''. 
+\item \texttt{edge find\_edge(basic\_block pred, basic\_block succ)}. Find the edge from \texttt{pred} to \texttt{succ}. If there's no such edge, return NULL. This function can be found at the file ``gcc/cfganal.c''.
+\item \texttt{void remove\_edge(edge e)}. Remove the edge \texttt{e} from the CFG.
+\item \texttt{edge redirect\_edge\_and\_branch(edge e, basic\_block dest)}. From ``gcc/cfghooks.c'', ``Redirect edge \texttt{e} to the given basic block \texttt{dest} and update underlying program representation.  Returns edge representing redirected branch (that may not be equivalent to E in the case of duplicate edges being removed) or NULL if edge is not easily redirectable for whatever reason.''.
+\end{enumerate}
+For edges representing ``goto'', for example out edges of if...cond statement, user needs to set the edge's member variable \texttt{goto\_locus} and \texttt{goto\_block}.
+Developer can use the marco \texttt{FOR\_EACH\_EDGE()} to traverse the edge of a given basic block, you can check the official ``GCC Internal Manual'' for detail.
+There are also a bunch of other helpful functions that I have not listed. So you can check ``gcc/cfghooks.c'' for more information.
+
+\subsection{Maintain dominance tree}
+Other than maintaining the CFG, we should maintain the dominance information between basic blocks as well. There are two kinds of dominance directions, dominance(\texttt{CDI\_DOMINATORS}) and post dominance(\texttt{CDI\_POST\_DOMINATORS}). Usually we do not care post dominance. So in following parts, dominance direction refers to the dominance(\texttt{CDI\_DOMINATORS}) if not specified explicitly. If one block A is the direct son of another block B in CFG, we say B is dominating A, or A is dominated by B, or B is the dominator of A. In GCC, this dominance information is generated by using DFS(depth first search) travelling the CFG. There should not be any loops in dominance information, and one blocks should not be dominated by more than one blocks. So one method is clearing all the dominance informationa after modifying the CFG, and ask GCC to rebuild it, but this method is slow and inefficient. Another one is maintaining the dominance information manual when modifying the CFG. 
+
+
+Here are some very useful functions for maintaining the dominance information manually:
+\begin{enumerate}
+\item \texttt{basic\_block get\_immediate\_dominator(enum cdi\_direction dir, basic\_block bb)}. Giving a dominance direction(\texttt{CDI\_DOMINATORS}, \texttt{CDI\_POST\_DOMINATORS}), and a basic block, return the dominator of bb according to the direction. 
+\item \texttt{void set\_immediate\_dominator(enum cdi\_direction dir, basic\_block bb, basic\_block dominated\_by)}. Set the dominator of \texttt{bb} to \texttt{dominated\_by} according to the \texttt{dir}.
+\item \texttt{void redirect\_immediate\_dominators(enum cdi\_direction dir, basic\_block bb, basic\_block to)}. Set blocks' dominators which are \texttt{bb} to \texttt{tt}.
+\end{enumerate}
+
+For more detail, please check the file ``gcc/dominance.c''.
+
+\subsection{Example}
+This subsection will give an example of inserting the code in the figure \ref{fig:origin-loop-example} into a program, suppose between \texttt{start\_bb} and \texttt{end\_bb}, and suppose the edge from \texttt{start\_bb} to \texttt{end\_bb} is the fall-through edge. The code of the instrumentation is in the figure \ref{fig:instrument-loop-example}.
+
+\begin{figure}
+\begin{lstlisting}
+int i;
+for(i = 0; i < 10; i ++);
+\end{lstlisting}
+\caption{A loop example which will be inserted into a program}
+\label{fig:origin-loop-example}
+\end{figure}
+
+\begin{figure}
+\begin{lstlisting}
+basic_block bb, new_bb, cond_bb, then_bb, else_bb, first_new_bb;
+tree counter_i;
+gimple_stmt_iterator gsi;
+gimple_seq gseq;
+gimple gstmt;
+edge e;
+
+counter_i = make_rename_temp(integer_type_node, "i");
+bb =  start_bb;
+else_bb = end\_bb;
+
+/* remove edge from start_bb to end_bb */
+e = find_edge(start_bb, end_bb);
+if(e != NULL)
+    remove_edge(e);
+
+/* insert i = 0 */
+gseq = gimple_seq_alloc();
+gstmt = gimple_build_assign(counter_i, integer_zero_node);
+gimple_seq_add_stmt(&gseq, gstmt);
+new_bb = create_basic_block(gseq, NULL, bb);
+new_bb->discriminator = bb->discriminator + 1;
+e = make_edge(bb, new_bb, EDGE_FALLTHRU);
+bb = new_bb;
+first_new_bb = new_bb;
+for(gsi = gsi_start_bb(bb); !gsi_end_p(gsi); gsi_next(&gsi))
+    gimple_set_bb(gsi_stmt(gsi), bb);
+
+/* insert i = i + 1 */
+gseq = gimple_seq_alloc();
+gstmt = gimple_build_assign_with_ops(PLUS_EXPR, counter_i, counter_i, integer_one_node);
+gimple_seq_add_stmt(&gseq, gstmt);
+new_bb = create_basic_block(gseq, NULL, bb);
+new_bb->discriminator = bb->discriminator + 1;
+e = make_edge(bb, new_bb, EDGE_FALLTHRU);
+set_immediate_dominator(CDI_DOMINATORS, new_bb, bb);
+bb = new_bb;
+then_bb = new_bb;
+for(gsi = gsi_start_bb(bb); !gsi_end_p(gsi); gsi_next(&gsi))
+    gimple_set_bb(gsi_stmt(gsi), bb);
+
+
+/* insert if...cond: if i < 10 */
+gseq = gimple_seq_alloc();
+gstmt = gimple_build_cond(LT_EXPR, counter_i, build_int_cst(NULL_TREE, 10), NULL_TREE, NULL_TREE);
+gimple_seq_add_stmt(&gseq, gstmt);
+new_bb = create_basic_block(gseq, NULL, bb);
+new_bb->discriminator = bb->discriminator + 1;
+e = make_edge(bb, new_bb, EDGE_FALLTHRU);
+set_immediate_dominator(CDI_DOMINATORS, new_bb, bb);
+bb = new_bb;
+cond_bb = new_bb;
+for(gsi = gsi_start_bb(bb); !gsi_end_p(gsi); gsi_next(&gsi))
+    gimple_set_bb(gsi_stmt(gsi), bb);
+
+e = make_edge(cond_bb, then_bb, EDGE_TRUE_VALUE);
+e->goto_locus = cfun->function_start_locus;
+e->goto_block = DECL_INITIAL(current_function_decl);
+
+e = make_edge(cond_bb, else_bb, EDGE_FALSE_VALUE);
+e->goto_locus = cfun->function_start_locus;
+e->goto_block = DECL_INITIAL(current_function_decl);
+
+redirect_immediate_dominators(CDI_DOMINATORS, start_bb, bb);
+set_immediate_dominator(CDI_DOMINATOR, first_new_bb, start_bb);
+
+\end{lstlisting}
+\caption{Instrmentation code for the figure \ref{fig:origin-loop-example}}
+\label{fig:instrument-loop-example}
+\end{figure}
+
+\pagebreak
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%SEC: Mistakes in GCC Internal Manual %%%%%%%%%
+\section{Mistakes in GCC Internal Manual}
+\subsection{Traverse basic blocks}
+\texttt{bi} is no longer supported. Use \texttt{FOR\_EACH\_BB} to traverse each basic block, and use the \texttt{gsi} method mentioned in the manual to traverse the gimple statements in each basic block instead.
+
+\end{document}  
